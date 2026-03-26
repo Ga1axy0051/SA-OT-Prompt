@@ -1,0 +1,21 @@
+# 忽略所有的日志文件夹和日志文件
+logs_*/
+*.log
+*.txt
+
+# 忽略 Python 缓存和系统文件
+__pycache__/
+*.pyc
+.DS_Store
+
+# 忽略可能存在的模型权重（太大了，GitHub 传不上去）
+*.pt
+*.pth
+logs_*/
+*.log
+*.txt
+__pycache__/
+*.pyc
+.DS_Store
+*.pt
+*.pth
