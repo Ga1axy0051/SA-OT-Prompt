@@ -19,8 +19,10 @@ from utils.legacy_utils import normalize_edge, NodeEva
 from models.graphmae import build_model
 from models.Base import LogReg
 
+# 🚨 导入所有 Baseline 的 Prompt 模块
+from models import GPPT_Prompt, GPF_Prompt, GPF_plus_Prompt, EdgePrompt, EdgePrompt_plus, GraphPrompt_Prompt, AllInOne_Prompt
+
 def compute_homophily(edge_index, y):
-    """ 计算图的同配性分数 (Edge Homophily) """
     src, dst = edge_index
     same_label = (y[src] == y[dst]).sum().item()
     return same_label / edge_index.size(1) if edge_index.size(1) > 0 else 0
@@ -36,34 +38,23 @@ def set_seed(seed):
 def run(args, device):
     print(f"========== Start Task: {args.dataset} | Method: {args.method} ==========")
     
-    # ==========================================
     # 1. 加载与预处理数据
-    # ==========================================
     data, input_dim, output_dim = load_dataset(args.dataset, data_dir="./data/raw")
     data = data.to(device)
     
-    # 🛡️ 扰动模块 A：特征掩码 (Feature Masking) - 模拟特征缺失
     if args.feat_mask > 0:
-        print(f">>> Applying {args.feat_mask*100}% Feature Masking (Zeroing out features)...")
-        # 生成掩码：保留 (1 - feat_mask) 的特征，丢弃 feat_mask 的特征
         mask = torch.rand_like(data.x) > args.feat_mask
         data.x = data.x * mask
 
-    # ☠️ 扰动模块 B：结构噪声 (Edge Noise) - 模拟错连边
     if args.noise > 0:
-        print(f">>> Injecting {args.noise*100}% heterophilic noise edges...")
         data.edge_index = inject_noise_edges(data.edge_index, data.y, args.noise)
     
-    # 边权重归一化
     edge_weight = torch.ones(data.edge_index.size(1), dtype=torch.float32, device=device)
     edge_index, edge_weight = add_self_loops(data.edge_index, edge_weight)
     edge_weight = normalize_edge(edge_index, edge_weight, data.num_nodes).to(device)
     edge_index = edge_index.to(device)
 
-    # ==========================================
     # 2. Stage 1: 加载/训练预训练基座
-    # ==========================================
-    print(">>> Stage 1: Loading/Training Base Encoder...")
     model_save_path = f'./pretrain_model/{args.model}/{args.dataset}_hid{args.hid_dim}.pkl'
     os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
 
@@ -81,10 +72,7 @@ def run(args, device):
     
     base_encoder.load_state_dict(torch.load(model_save_path, weights_only=True))
 
-    # ==========================================
     # 3. Stage 2: 下游 Few-shot 适配
-    # ==========================================
-    print(">>> Stage 2: Few-shot Downstream Adaptation...")
     test_accs, f1s, rocs = [], [], []
     down_loss_fn = nn.CrossEntropyLoss()
 
@@ -94,9 +82,9 @@ def run(args, device):
         data = generate_few_shot_splits(data, output_dim, shot=args.shot, seed=current_seed)
         
         classifier = LogReg(args.hid_dim, output_dim).to(device)
-        prompt = None # 提前占位，防止 UnboundLocalError
+        prompt = None 
         
-        # 初始化 Prompt 或 调整基座梯度
+        # 🟢 【核心初始化区：分发所有方法】
         if args.method == 'sa_ot_prompt':
             prompt = SAOTPrompt(data.x, input_dim, args.num_prompts, args.ot_epsilon, args.k).to(device)
             base_encoder.eval()
@@ -128,8 +116,40 @@ def run(args, device):
                 {"params": classifier.parameters(), "lr": 0.05}
             ])
 
-        elif args.method == 'hybrid_prompt':
-            prompt = HybridPrompt(data.x, input_dim, args.num_prompts, args.ot_epsilon, args.k, args.alpha).to(device)
+        elif args.method == 'gppt':
+            classifier = GPPT_Prompt(in_dim=args.hid_dim, num_classes=output_dim).to(device)
+            base_encoder.eval()
+            for param in base_encoder.parameters(): param.requires_grad = False
+            optimizer_down = torch.optim.Adam(classifier.parameters(), lr=args.down_lr, weight_decay=args.down_wd)
+            
+        elif args.method in ['gpf', 'gpf_plus', 'all_in_one']:
+            # Input-level prompt
+            if args.method == 'gpf': prompt = GPF_Prompt(in_dim=input_dim).to(device)
+            elif args.method == 'gpf_plus': prompt = GPF_plus_Prompt(in_dim=input_dim).to(device)
+            elif args.method == 'all_in_one': prompt = AllInOne_Prompt(in_dim=input_dim).to(device)
+            
+            base_encoder.eval()
+            for param in base_encoder.parameters(): param.requires_grad = False
+            optimizer_down = torch.optim.Adam([
+                {"params": prompt.parameters(), "lr": args.down_lr},
+                {"params": classifier.parameters(), "lr": 0.05}
+            ], weight_decay=args.down_wd)
+
+        elif args.method in ['edgeprompt', 'edgeprompt_plus']:
+            # Structure-level prompt
+            if args.method == 'edgeprompt': prompt = EdgePrompt(in_dim=input_dim).to(device)
+            else: prompt = EdgePrompt_plus(in_dim=input_dim).to(device)
+            
+            base_encoder.eval()
+            for param in base_encoder.parameters(): param.requires_grad = False
+            optimizer_down = torch.optim.Adam([
+                {"params": prompt.parameters(), "lr": args.down_lr},
+                {"params": classifier.parameters(), "lr": 0.05}
+            ], weight_decay=args.down_wd)
+
+        elif args.method == 'graphprompt':
+            # Representation-level prompt
+            prompt = GraphPrompt_Prompt(in_dim=args.hid_dim).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
             optimizer_down = torch.optim.Adam([
@@ -148,19 +168,45 @@ def run(args, device):
                 classifier.train()
                 optimizer_down.zero_grad()
                 
-                # --- 前向传播 ---
+                # 🟢 【核心执行区：前向传播逻辑分发】
+                ot_loss_val = torch.tensor(0.0).to(device)
+
                 if args.method in ['sa_ot_prompt', 'hybrid_prompt']:
                     x_ad, ot_l, pt_idx, pt_w = prompt(data.x, edge_index, edge_weight)
                     c_idx, c_w = prompt.edge_fuse(edge_index, edge_weight, pt_idx, pt_w, args.tau)
                     embeds = base_encoder.embed(x_ad, c_idx, c_w)
                     ot_loss_val = ot_l
+                
                 elif args.method == 'uniprompt':
                     pt_idx, pt_w = prompt()
                     comb_index, comb_weight = prompt.edge_fuse(edge_index, edge_weight, pt_idx, pt_w, args.tau)
                     embeds = base_encoder.embed(data.x, comb_index, comb_weight)
-                else:
+                
+                elif args.method in ['gpf', 'gpf_plus']:
+                    # Input-level: 修改节点特征
+                    prompted_x = prompt(data.x)
+                    embeds = base_encoder.embed(prompted_x, edge_index, edge_weight)
+                
+                elif args.method == 'all_in_one':
+                    # All-in-one: 获取加入了虚拟节点的新图
+                    new_x, new_edge_index, new_edge_weight = prompt(data.x, edge_index, edge_weight)
+                    # 喂给基座 (此时输入的节点数变多了！)
+                    full_embeds = base_encoder.embed(new_x, new_edge_index, new_edge_weight)
+                    # 🚨 极其关键：裁掉尾部的 prompt 虚拟节点，只保留原图节点的 embeddings！
+                    embeds = full_embeds[:data.num_nodes]
+                
+                elif args.method in ['edgeprompt', 'edgeprompt_plus']:
+                    # Structure-level: 修改边权重
+                    new_edge_weight = prompt(data.x, edge_index, edge_weight)
+                    embeds = base_encoder.embed(data.x, edge_index, new_edge_weight)
+                
+                elif args.method == 'graphprompt':
+                    # Representation-level: 修改输出表征
+                    raw_embeds = base_encoder.embed(data.x, edge_index, edge_weight)
+                    embeds = prompt(raw_embeds)
+                
+                else: # fine_tune, linear_probe, gppt
                     embeds = base_encoder.embed(data.x, edge_index, edge_weight)
-                    ot_loss_val = torch.tensor(0.0).to(device)
                 
                 logits = classifier(embeds)
                 train_loss = down_loss_fn(logits[data.train_mask], data.y[data.train_mask])
@@ -171,11 +217,12 @@ def run(args, device):
 
                 # --- 验证逻辑 ---
                 with torch.no_grad():
+                    classifier.eval()
                     val_logits = classifier(embeds)
                     v_loss = down_loss_fn(val_logits[data.val_mask], data.y[data.val_mask])
                     v_acc = (val_logits[data.val_mask].argmax(1) == data.y[data.val_mask]).sum().item() / data.val_mask.sum().item()
 
-                pbar.set_postfix({'val_acc': f"{v_acc:.4f}", 'train_loss': f"{train_loss.item():.4f}"})
+                pbar.set_postfix({'val_acc': f"{v_acc:.4f}", 'loss': f"{train_loss.item():.4f}"})
                 pbar.update()
 
                 # 早停判定
@@ -192,32 +239,36 @@ def run(args, device):
                     cnt_wait += 1
                     if cnt_wait >= args.patience: break
 
-        # ==========================================
         # 4. 测试评估
-        # ==========================================
         classifier.load_state_dict({k: v.to(device) for k, v in best_classifier_state.items()})
         classifier.eval()
         with torch.no_grad():
-            if args.method in ['sa_ot_prompt', 'hybrid_prompt']:
+            if prompt is not None:
                 prompt.load_state_dict({k: v.to(device) for k, v in best_prompt_state.items()})
                 prompt.eval()
+
+            if args.method in ['sa_ot_prompt', 'hybrid_prompt']:
                 x_ad, _, pt_idx, pt_w = prompt(data.x, edge_index, edge_weight)
                 comb_index, comb_weight = prompt.edge_fuse(edge_index, edge_weight, pt_idx, pt_w, args.tau)
                 embeds = base_encoder.embed(x_ad, comb_index, comb_weight)
-                h_orig = compute_homophily(data.edge_index, data.y)
-                h_new = compute_homophily(comb_index, data.y)
-                print(f"   [Structural Analysis] Original Homophily: {h_orig:.4f} -> Prompted: {h_new:.4f}")
             
             elif args.method == 'uniprompt':
-                prompt.load_state_dict({k: v.to(device) for k, v in best_prompt_state.items()})
-                prompt.eval()
                 pt_idx, pt_w = prompt()
                 comb_index, comb_weight = prompt.edge_fuse(edge_index, edge_weight, pt_idx, pt_w, args.tau)
                 embeds = base_encoder.embed(data.x, comb_index, comb_weight)
-                h_orig = compute_homophily(data.edge_index, data.y)
-                h_new = compute_homophily(comb_index, data.y)
-                print(f"   [Structural Analysis] Original Homophily: {h_orig:.4f} -> Prompted: {h_new:.4f}")
             
+            elif args.method in ['gpf', 'gpf_plus', 'all_in_one']:
+                prompted_x = prompt(data.x)
+                embeds = base_encoder.embed(prompted_x, edge_index, edge_weight)
+                
+            elif args.method in ['edgeprompt', 'edgeprompt_plus']:
+                new_edge_weight = prompt(data.x, edge_index, edge_weight)
+                embeds = base_encoder.embed(data.x, edge_index, new_edge_weight)
+                
+            elif args.method == 'graphprompt':
+                raw_embeds = base_encoder.embed(data.x, edge_index, edge_weight)
+                embeds = prompt(raw_embeds)
+
             else:
                 if args.method == 'fine_tune' and best_base_state is not None: 
                     base_encoder.load_state_dict({k: v.to(device) for k, v in best_base_state.items()})
@@ -233,30 +284,29 @@ def run(args, device):
             f1s.append(t_f1)
             rocs.append(t_roc)
 
-            # 显存清道夫
             del classifier, optimizer_down
-            if prompt is not None:
-                del prompt
+            if prompt is not None: del prompt
             torch.cuda.empty_cache()
 
-    # ==========================================
     # 5. 最终汇总
-    # ==========================================
     print("\n" + "="*50)
     print(f"Final Report: {args.dataset} | Method: {args.method}")
     if len(test_accs) > 0:
         print(f"Accuracy: {np.mean(test_accs):.4f} ± {np.std(test_accs):.4f}")
-        print(f"Macro F1: {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
-        if len(rocs) > 0:
-            print(f"AUROC   : {np.mean(rocs):.4f} ± {np.std(rocs):.4f}")
     print("="*50 + "\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='cora')
     parser.add_argument('--model', type=str, default='GraphMAE')
-    parser.add_argument('--method', type=str, default='sa_ot_prompt', choices=['sa_ot_prompt', 'linear_probe', 'fine_tune', 'uniprompt', 'hybrid_prompt'])
-    parser.add_argument('--seed', type=int, default=42, help='Random seed.')
+    
+    # 🚨 这里已经把 12 种兵器全部加入了兵器谱！
+    parser.add_argument('--method', type=str, default='sa_ot_prompt', 
+                        choices=['sa_ot_prompt', 'linear_probe', 'fine_tune', 'uniprompt', 
+                                 'hybrid_prompt', 'gppt', 'gpf', 'gpf_plus', 
+                                 'graphprompt', 'all_in_one', 'edgeprompt', 'edgeprompt_plus'])
+                                 
+    parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--hid_dim', type=int, default=256)
     parser.add_argument('--lr', type=float, default=0.0005)
     parser.add_argument('--wd', type=float, default=1e-5)
@@ -272,11 +322,9 @@ if __name__ == "__main__":
     parser.add_argument('--ot_epsilon', type=float, default=0.1)
     parser.add_argument('--ot_beta', type=float, default=0.01)
     parser.add_argument('--k', type=int, default=50)
-    parser.add_argument('--alpha', type=float, default=0.5, help='Fusion weight for HybridPrompt')
-    
-    # 🛡️ 核心新增：控制特征噪声与结构噪声的接口
-    parser.add_argument('--noise', type=float, default=0.0, help='Ratio of heterophilic noise edges')
-    parser.add_argument('--feat_mask', type=float, default=0.0, help='Ratio of feature dimensions to randomly mask (0.0 to 1.0)')
+    parser.add_argument('--alpha', type=float, default=0.5)
+    parser.add_argument('--noise', type=float, default=0.0)
+    parser.add_argument('--feat_mask', type=float, default=0.0)
     
     args = parser.parse_args()
     set_seed(args.seed)
