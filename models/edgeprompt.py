@@ -1,38 +1,50 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.utils import degree
 
 class EdgePrompt(nn.Module):
     def __init__(self, in_dim):
-        super().__init__()
-        # 学习一个边打分器，输入为相连两个节点的特征拼接
-        self.edge_scorer = nn.Linear(in_dim * 2, 1)
-        
-    def forward(self, x, edge_index, edge_weight):
+        super(EdgePrompt, self).__init__()
+        self.global_prompt = nn.Parameter(torch.empty(1, in_dim))
+        # 🚨 核心修复 1：降低初始化倍率，防止初始状态直接淹没原特征
+        nn.init.xavier_uniform_(self.global_prompt, gain=0.1)
+
+    def forward(self, x, edge_index):
         src, dst = edge_index
-        edge_feats = torch.cat([x[src], x[dst]], dim=-1)
-        # 用 Sigmoid 将打分压缩到 0~1，作为边的保留/增强系数
-        prompt_scores = torch.sigmoid(self.edge_scorer(edge_feats)).squeeze(-1)
-        return edge_weight * prompt_scores
+        edge_prompt = self.global_prompt.expand(edge_index.size(1), -1)
+        
+        node_prompt = torch.zeros_like(x)
+        node_prompt.scatter_add_(0, dst.unsqueeze(-1).expand(-1, x.size(1)), edge_prompt)
+        
+        # 🚨 核心修复 2：求均值！消除度数爆炸导致的高维溢出！
+        deg = degree(dst, x.size(0), dtype=x.dtype).clamp(min=1).unsqueeze(-1)
+        node_prompt = node_prompt / deg
+        
+        return x + node_prompt
 
 class EdgePrompt_plus(nn.Module):
-    def __init__(self, in_dim, num_bases=5):
-        super().__init__()
-        # EdgePrompt+ 维护一组边特征的“基向量” (Basis Vectors)
-        self.bases = nn.Parameter(torch.empty(num_bases, in_dim * 2))
-        nn.init.xavier_uniform_(self.bases)
-        self.attn = nn.Linear(in_dim * 2, num_bases)
-        self.scorer = nn.Linear(in_dim * 2, 1)
+    def __init__(self, in_dim, num_anchors=5):
+        super(EdgePrompt_plus, self).__init__()
+        self.anchor_prompt = nn.Parameter(torch.empty(num_anchors, in_dim))
+        self.w = nn.Linear(2 * in_dim, num_anchors)
+        
+        # 🚨 核心修复 1
+        nn.init.xavier_uniform_(self.anchor_prompt, gain=0.1)
+        self.w.reset_parameters()
 
-    def forward(self, x, edge_index, edge_weight):
+    def forward(self, x, edge_index):
         src, dst = edge_index
-        edge_feats = torch.cat([x[src], x[dst]], dim=-1) # [E, 2d]
+        combined_x = torch.cat([x[src], x[dst]], dim=-1)
         
-        # 计算注意力权重并融合基向量
-        attn_weights = torch.softmax(self.attn(edge_feats), dim=-1) # [E, num_bases]
-        prompt_edge_feats = torch.matmul(attn_weights, self.bases) # [E, 2d]
+        b = F.softmax(F.leaky_relu(self.w(combined_x)), dim=1)
+        edge_prompt = b.mm(self.anchor_prompt) 
         
-        # 结合原始边特征并打分
-        combined_feats = edge_feats + prompt_edge_feats
-        prompt_scores = torch.sigmoid(self.scorer(combined_feats)).squeeze(-1)
+        node_prompt = torch.zeros_like(x)
+        node_prompt.scatter_add_(0, dst.unsqueeze(-1).expand(-1, x.size(1)), edge_prompt)
         
-        return edge_weight * prompt_scores
+        # 🚨 核心修复 2：求均值！
+        deg = degree(dst, x.size(0), dtype=x.dtype).clamp(min=1).unsqueeze(-1)
+        node_prompt = node_prompt / deg
+        
+        return x + node_prompt

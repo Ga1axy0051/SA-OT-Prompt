@@ -22,6 +22,11 @@ def load_dataset(dataset_name, data_dir="./data/raw"):
         
     elif dataset_name in ['chameleon', 'squirrel']:
         dataset = WikipediaNetwork(root=data_dir, name=dataset_name.capitalize(), transform=transform)
+
+    elif dataset_name == 'actor':
+        from torch_geometric.datasets import Actor
+        import os
+        dataset = Actor(root=os.path.join(data_dir, 'Actor'))
         
     # 👑 杀手级主场 1：Amazon 商品购买网络 (特征极弱，高度依赖购买结构)
     elif dataset_name in ['amazon-computers', 'amazon-photo']:
