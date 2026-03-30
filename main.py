@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from torch_geometric.utils import add_self_loops
+from torch_geometric.nn import GCNConv  # 🟢 [新增]: 用于 GRACE 编码器的实例化
 
 # 导入自定义模块
 from utils.data_loader import load_dataset, generate_few_shot_splits, inject_noise_edges
@@ -17,6 +18,8 @@ from utils.legacy_utils import normalize_edge, NodeEva
 
 # 导入基座模型
 from models.graphmae import build_model
+from models.DGI import DGI
+from models.GRACE import Encoder, Model as GRACE_Model
 from models.Base import LogReg
 
 # 导入所有 Baseline 的 Prompt 模块
@@ -52,25 +55,67 @@ def run(args, device):
     edge_weight = normalize_edge(edge_index, edge_weight, data.num_nodes).to(device)
     edge_index = edge_index.to(device)
 
-    # 2. Stage 1: 加载/训练预训练基座
+    # ==============================================================
+    # 2. Stage 1: 加载/训练预训练基座 (🟢 核心修改区域)
+    # ==============================================================
     model_save_path = f'./pretrain_model/{args.model}/{args.dataset}_hid{args.hid_dim}.pkl'
     os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
 
-    base_encoder = build_model(num_hidden=args.hid_dim, num_features=input_dim).to(device)
+    # [1] 根据参数实例化三大不同的预训练底座
+    if args.model == 'GraphMAE':
+        raw_model = build_model(num_hidden=args.hid_dim, num_features=input_dim).to(device)
+    elif args.model == 'DGI':
+        raw_model = DGI(input_dim, args.hid_dim, 'prelu').to(device)
+    elif args.model == 'GRACE':
+        encoder = Encoder(input_dim, args.hid_dim, nn.PReLU(), base_model=GCNConv, k=2).to(device)
+        raw_model = GRACE_Model(encoder, args.hid_dim, args.hid_dim, 0.5).to(device)
+    else:
+        raise ValueError(f"Unsupported model: {args.model}")
     
+    # [2] 权重加载与预训练拦截
     if not os.path.exists(model_save_path):
-        optimizer = torch.optim.Adam(base_encoder.parameters(), lr=args.lr, weight_decay=args.wd)
-        base_encoder.train()
+        if args.model != 'GraphMAE':
+            # 强行拦截！如果是 DGI/GRACE 但没找到权重，提示必须用 UniPrompt 官方脚本先跑
+            raise FileNotFoundError(f"⚠️ 找不到 {args.model} 的权重 ({model_save_path})。请先使用 UniPrompt 的脚本完成预训练！")
+        
+        print("未找到 GraphMAE 权重，正在自动执行预训练...")
+        optimizer = torch.optim.Adam(raw_model.parameters(), lr=args.lr, weight_decay=args.wd)
+        raw_model.train()
         for _ in range(args.epochs):
             optimizer.zero_grad()
-            loss, _ = base_encoder(data.x, edge_index, edge_weight)
+            loss, _ = raw_model(data.x, edge_index, edge_weight)
             loss.backward()
             optimizer.step()
-        torch.save(base_encoder.state_dict(), model_save_path)
+        torch.save(raw_model.state_dict(), model_save_path)
     
-    base_encoder.load_state_dict(torch.load(model_save_path, map_location=device, weights_only=True))
+    # 统一加载权重
+    raw_model.load_state_dict(torch.load(model_save_path, map_location=device, weights_only=True))
 
-    # 3. Stage 2: 下游 Few-shot 适配
+    # [3] 透明代理层 (BackboneWrapper)：抹平 DGI 返回值的差异
+    class BackboneWrapper:
+        def __init__(self, model_type, model):
+            self.model_type = model_type
+            self.model = model
+            
+        def embed(self, x, edge_index, edge_weight):
+            if self.model_type == 'DGI':
+                # DGI 的 embed 需要一个 None 掩码，且返回值为 (z, c)
+                z, _ = self.model.embed(x, edge_index, edge_weight, None)
+                return z
+            else:
+                return self.model.embed(x, edge_index, edge_weight)
+                
+        def __getattr__(self, name):
+            # 任何非 embed 的调用 (比如 .parameters(), .eval(), .load_state_dict())
+            # 都会被无缝原样传递给内部真实的 raw_model
+            return getattr(self.model, name)
+
+    # 用代理层将原始模型包起来！下游代码从此高枕无忧！
+    base_encoder = BackboneWrapper(args.model, raw_model)
+
+    # ==============================================================
+    # 3. Stage 2: 下游 Few-shot 适配 (下游代码完全无需任何修改！)
+    # ==============================================================
     test_accs, f1s, rocs = [], [], []
     down_loss_fn = nn.CrossEntropyLoss()
 
@@ -172,7 +217,6 @@ def run(args, device):
             
             ot_loss_val = torch.tensor(0.0).to(device)
 
-            # 🟢 【彻底修复的逻辑分发分支】
             if args.method in ['sa_ot_prompt', 'hybrid_prompt']:
                 x_ad, ot_l, pt_idx, pt_w = prompt(data.x, edge_index, edge_weight)
                 c_idx, c_w = prompt.edge_fuse(edge_index, edge_weight, pt_idx, pt_w, args.tau)
@@ -189,7 +233,6 @@ def run(args, device):
                 embeds = base_encoder.embed(prompted_x, edge_index, edge_weight)
             
             elif args.method == 'all_in_one':
-                # 修复版：截断扩充的虚拟节点
                 new_x, new_edge_index, new_edge_weight = prompt(data.x, edge_index, edge_weight)
                 full_embeds = base_encoder.embed(new_x, new_edge_index, new_edge_weight)
                 embeds = full_embeds[:data.num_nodes]
@@ -282,12 +325,13 @@ def run(args, device):
             if prompt is not None: del prompt
             torch.cuda.empty_cache()
 
-    print(f"Accuracy: {np.mean(test_accs):.4f} ± {np.std(test_accs):.4f}")
+    print(f"[{args.model}] + [{args.method}] Accuracy: {np.mean(test_accs):.4f} ± {np.std(test_accs):.4f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='cora')
-    parser.add_argument('--model', type=str, default='GraphMAE')
+    # 🟢 增加 choices 安全限制，明确三大底座
+    parser.add_argument('--model', type=str, default='GraphMAE', choices=['GraphMAE', 'DGI', 'GRACE'])
     parser.add_argument('--method', type=str, default='sa_ot_prompt', 
                         choices=['sa_ot_prompt', 'linear_probe', 'fine_tune', 'uniprompt', 
                                  'hybrid_prompt', 'gppt', 'gpf', 'gpf_plus', 

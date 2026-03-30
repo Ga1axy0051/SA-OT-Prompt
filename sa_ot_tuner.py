@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # 👑 亲儿子专属·局部精确爆破引擎
 # ==========================================
 GPUS = ['3'] 
-MAX_CONCURRENT_PER_GPU = 5  # 极其稳定
+MAX_CONCURRENT_PER_GPU = 2  # 极其稳定
 
 PRETRAIN = "GraphMAE"
 TRAILS = 30

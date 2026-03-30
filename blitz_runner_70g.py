@@ -8,31 +8,35 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==========================================
 # ☢️ 核动力引擎配置 (专为 70G 显存定制)
 # ==========================================
-GPUS = ['5'] 
-# 70G 显存极其宽裕！保守设置同时跑 15 个并发任务 (如果 nvidia-smi 显示显存没满，你可以改成 20 甚至 25)
+GPUS = ['2']  # 🟢 精准指定空闲的卡 2
+# 跑 1-shot 显存占用更小，3 个并发在 70G 上绝对稳，如闲置较多可调至 4 或 5
 MAX_CONCURRENT_PER_GPU = 3  
 
 # 基础护甲
-PRETRAIN = "GraphMAE"
+PRETRAIN = "DGI" # 🟢 随时可改成 "DGI" 或 "GRACE"，脚本会自动区分输出文件！
 TRAILS = 30
 EPOCHS = 2000
 PATIENCE = 20
 
-# 搜索空间 (9大数据集 x 9大基线 x 2种Shot)
+# 搜索空间 
 DATASETS = ["cora", "citeseer", "pubmed", "cornell", "texas", "wisconsin", "chameleon", "actor", "squirrel"]
-METHODS = ["linear_probe", "fine_tune", "gpf", "gpf_plus","edgeprompt", "edgeprompt_plus", "graphprompt", "all_in_one", "gppt"]
-SHOTS = [1, 5]
+METHODS = ["linear_probe", "fine_tune", "gpf", "gpf_plus", "edgeprompt", "edgeprompt_plus", "graphprompt", "all_in_one", "gppt"]
+SHOTS = [1]  # 🟢 现阶段仅跑 1-shot
 
-# 核心超参网格 (既然算力够，我们把学习率的粒度稍微做细一点，确保捉到最高分)
+# 核心超参网格
 LRS = [0.01, 0.005, 0.001]
 WDS = [5e-4, 5e-5, 1e-5]
 
 best_results = {}
 
+# 🟢 动态生成排行榜文件名，防止不同预训练底座的数据互相覆盖
+LEADERBOARD_FILE = f"Leaderboard_{PRETRAIN}_{SHOTS[0]}shot.md"
+
 # ==========================================
 # 🛡️ 核心调度逻辑
 # ==========================================
 def parse_accuracy(log_content):
+    # 解析倒数 15 行内的准确率输出
     lines = log_content.strip().split('\n')[-15:]
     for line in lines:
         match = re.search(r'Accuracy:\s*([0-9.]+)\s*±\s*([0-9.]+)', line)
@@ -41,8 +45,9 @@ def parse_accuracy(log_content):
     return None, None
 
 def update_leaderboard():
-    with open("70G_Leaderboard.md", "w", encoding="utf-8") as f:
-        f.write("# 🏆 70G VRAM - Real-time Baselines Leaderboard\n\n")
+    with open(LEADERBOARD_FILE, "w", encoding="utf-8") as f:
+        # 🟢 标题栏高亮当前的预训练底座
+        f.write(f"# 🏆 {PRETRAIN} - 1-Shot Baselines Leaderboard\n\n")
         f.write("| Dataset | Shot | Method | Best Acc | Best Std | Best LR | Best WD |\n")
         f.write("|---|---|---|---|---|---|---|\n")
         
@@ -54,9 +59,11 @@ def update_leaderboard():
 
 def run_task(task):
     ds, method, shot, lr, wd, gpu_id = task
-    log_dir = "logs_70g_blitz"
+    # 🟢 独立的日志文件夹
+    log_dir = f"logs_{PRETRAIN}_1shot_blitz" 
     os.makedirs(log_dir, exist_ok=True)
-    log_file = f"{log_dir}/{ds}_{method}_{shot}shot_lr{lr}_wd{wd}.txt"
+    # 🟢 独立且详细的日志文件名
+    log_file = f"{log_dir}/{PRETRAIN}_{ds}_{method}_{shot}shot_lr{lr}_wd{wd}.txt"
 
     # 防弹断点续传
     if os.path.exists(log_file):
@@ -81,7 +88,6 @@ def run_task(task):
     # 挂载 GPU 环境变量并优化显存碎片分配
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = gpu_id
-    # PyTorch 显存动态分配优化，防止碎片化导致的假 OOM
     env["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 
     try:
@@ -100,7 +106,7 @@ def run_task(task):
 
 def main():
     print("==========================================================")
-    print("🚀 70G DOOMSDAY ENGINE INITIATED")
+    print(f"🚀 ENGINE INITIATED: [ {PRETRAIN} ] Base | 1-Shot Only")
     print(f"GPUs Available: {GPUS} | Concurrent Workers: {MAX_CONCURRENT_PER_GPU}")
     print("==========================================================\n")
 
@@ -127,7 +133,8 @@ def main():
             
             status_str = "[CACHED]" if is_cached else "[DONE]"
             if acc is not None:
-                print(f"{completed}/{total_tasks} {status_str} {ds} | {shot}s | {method} | lr={lr} wd={wd} ➡️ {acc:.4f}")
+                # 🟢 终端打印也会显示预训练模型名，防止你看花了眼
+                print(f"{completed}/{total_tasks} {status_str} [{PRETRAIN}] | {ds} | {method} | lr={lr} wd={wd} ➡️ {acc:.4f}")
                 
                 # 更新打擂台最高分
                 key = (ds, shot, method)
@@ -135,9 +142,9 @@ def main():
                     best_results[key] = (acc, std, lr, wd)
                     update_leaderboard()
             else:
-                print(f"{completed}/{total_tasks} [ERROR] {ds} | {shot}s | {method} | lr={lr} wd={wd} (Check log)")
+                print(f"{completed}/{total_tasks} [ERROR] [{PRETRAIN}] | {ds} | {method} | lr={lr} wd={wd} (Check log)")
 
-    print("\n🎉 ALL TASKS ANNIHILATED! Check '70G_Leaderboard.md' for the absolute SOTAs.")
+    print(f"\n🎉 ALL TASKS ANNIHILATED! Check '{LEADERBOARD_FILE}' for the absolute SOTAs.")
 
 if __name__ == "__main__":
     main()
