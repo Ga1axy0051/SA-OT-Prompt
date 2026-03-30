@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
-from torch_geometric.utils import add_self_loops
-from torch_geometric.nn import GCNConv  # 🟢 [新增]: 用于 GRACE 编码器的实例化
+from torch_geometric.utils import add_self_loops, dropout_adj
+from torch_geometric.nn import GCNConv
 
 # 导入自定义模块
 from utils.data_loader import load_dataset, generate_few_shot_splits, inject_noise_edges
@@ -16,10 +16,10 @@ from models.uniprompt import UniPrompt
 from models.hybrid_prompt import HybridPrompt
 from utils.legacy_utils import normalize_edge, NodeEva
 
-# 导入基座模型
+# 导入基座模型 (已包含 DGI 和 GRACE 的组件)
 from models.graphmae import build_model
-from models.DGI import DGI
-from models.GRACE import Encoder, Model as GRACE_Model
+from models.DGI import DGI, DGI_process
+from models.GRACE import Encoder, Model as GRACE_Model, drop_feature
 from models.Base import LogReg
 
 # 导入所有 Baseline 的 Prompt 模块
@@ -39,7 +39,9 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 def run(args, device):
+    # ==============================================================
     # 1. 加载与预处理数据
+    # ==============================================================
     data, input_dim, output_dim = load_dataset(args.dataset, data_dir="./data/raw")
     data = data.to(device)
     
@@ -56,12 +58,12 @@ def run(args, device):
     edge_index = edge_index.to(device)
 
     # ==============================================================
-    # 2. Stage 1: 加载/训练预训练基座 (🟢 核心修改区域)
+    # 2. Stage 1: 加载 / 全自动训练预训练基座
     # ==============================================================
     model_save_path = f'./pretrain_model/{args.model}/{args.dataset}_hid{args.hid_dim}.pkl'
     os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
 
-    # [1] 根据参数实例化三大不同的预训练底座
+    # [1] 实例化底座
     if args.model == 'GraphMAE':
         raw_model = build_model(num_hidden=args.hid_dim, num_features=input_dim).to(device)
     elif args.model == 'DGI':
@@ -72,26 +74,46 @@ def run(args, device):
     else:
         raise ValueError(f"Unsupported model: {args.model}")
     
-    # [2] 权重加载与预训练拦截
+    # [2] 🔥 全自动预训练引擎：如果找不到权重，不再报错，而是直接原地开始炼丹！
     if not os.path.exists(model_save_path):
-        if args.model != 'GraphMAE':
-            # 强行拦截！如果是 DGI/GRACE 但没找到权重，提示必须用 UniPrompt 官方脚本先跑
-            raise FileNotFoundError(f"⚠️ 找不到 {args.model} 的权重 ({model_save_path})。请先使用 UniPrompt 的脚本完成预训练！")
-        
-        print("未找到 GraphMAE 权重，正在自动执行预训练...")
+        print(f"🔥 未找到 {args.model} 权重 ({model_save_path})，正在全自动执行预训练...")
         optimizer = torch.optim.Adam(raw_model.parameters(), lr=args.lr, weight_decay=args.wd)
+        
+        if args.model == 'DGI':
+            loss_func = nn.BCEWithLogitsLoss()
+            
         raw_model.train()
-        for _ in range(args.epochs):
+        for epoch in range(args.epochs):
             optimizer.zero_grad()
-            loss, _ = raw_model(data.x, edge_index, edge_weight)
+            
+            if args.model == 'GraphMAE':
+                loss, _ = raw_model(data.x, edge_index, edge_weight)
+                
+            elif args.model == 'DGI':
+                shuf_x, lbl = DGI_process(data.num_nodes, data.x)
+                shuf_x, lbl = shuf_x.to(device), lbl.to(device)
+                logits = raw_model(data.x, shuf_x, edge_index, edge_weight, None, None, None)
+                loss = loss_func(logits, lbl)
+                
+            elif args.model == 'GRACE':
+                edge_index_1, edge_weight_1 = dropout_adj(edge_index, edge_weight, p=0.2)
+                edge_index_2, edge_weight_2 = dropout_adj(edge_index, edge_weight, p=0.2)
+                x_1 = drop_feature(data.x, 0.2)
+                x_2 = drop_feature(data.x, 0.2)
+                z1 = raw_model(x_1, edge_index_1, edge_weight_1)
+                z2 = raw_model(x_2, edge_index_2, edge_weight_2)
+                loss = raw_model.loss(z1, z2, batch_size=0)
+                
             loss.backward()
             optimizer.step()
+            
         torch.save(raw_model.state_dict(), model_save_path)
+        print(f"✅ {args.model} 在 {args.dataset} 上的预训练已完成，权重已保存！")
     
-    # 统一加载权重
+    # [3] 统一加载已存在的/刚刚训练好的权重
     raw_model.load_state_dict(torch.load(model_save_path, map_location=device, weights_only=True))
 
-    # [3] 透明代理层 (BackboneWrapper)：抹平 DGI 返回值的差异
+    # [4] 透明代理层 (BackboneWrapper)：抹平 DGI 返回值的差异
     class BackboneWrapper:
         def __init__(self, model_type, model):
             self.model_type = model_type
@@ -99,22 +121,18 @@ def run(args, device):
             
         def embed(self, x, edge_index, edge_weight):
             if self.model_type == 'DGI':
-                # DGI 的 embed 需要一个 None 掩码，且返回值为 (z, c)
                 z, _ = self.model.embed(x, edge_index, edge_weight, None)
                 return z
             else:
                 return self.model.embed(x, edge_index, edge_weight)
                 
         def __getattr__(self, name):
-            # 任何非 embed 的调用 (比如 .parameters(), .eval(), .load_state_dict())
-            # 都会被无缝原样传递给内部真实的 raw_model
             return getattr(self.model, name)
 
-    # 用代理层将原始模型包起来！下游代码从此高枕无忧！
     base_encoder = BackboneWrapper(args.model, raw_model)
 
     # ==============================================================
-    # 3. Stage 2: 下游 Few-shot 适配 (下游代码完全无需任何修改！)
+    # 3. Stage 2: 下游 Few-shot 适配 (从此高枕无忧)
     # ==============================================================
     test_accs, f1s, rocs = [], [], []
     down_loss_fn = nn.CrossEntropyLoss()
@@ -330,7 +348,6 @@ def run(args, device):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='cora')
-    # 🟢 增加 choices 安全限制，明确三大底座
     parser.add_argument('--model', type=str, default='GraphMAE', choices=['GraphMAE', 'DGI', 'GRACE'])
     parser.add_argument('--method', type=str, default='sa_ot_prompt', 
                         choices=['sa_ot_prompt', 'linear_probe', 'fine_tune', 'uniprompt', 
