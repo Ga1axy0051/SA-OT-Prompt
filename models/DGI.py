@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch.nn import Sequential, Linear, ReLU
 from torch_geometric.nn import GCNConv
 from torch_geometric.utils import dropout_adj
-from load_data import *
 
 class GCN(nn.Module):
     def __init__(self, 
