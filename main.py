@@ -149,37 +149,42 @@ def run(args, device):
             prompt = SAOTPrompt(data.x, input_dim, args.num_prompts, args.ot_epsilon, args.k).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
+            # 🟢 修复：解耦 down_lr (给Prompt) 和 clf_lr (给分类器)
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
-                {"params": classifier.parameters(), "lr": 0.05}
+                {"params": classifier.parameters(), "lr": args.clf_lr}
             ], weight_decay=args.down_wd)
             
         elif args.method == 'linear_probe':
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
-            optimizer_down = torch.optim.Adam(classifier.parameters(), lr=0.05, weight_decay=args.down_wd)
+            # 🟢 修复：替换硬编码
+            optimizer_down = torch.optim.Adam(classifier.parameters(), lr=args.clf_lr, weight_decay=args.down_wd)
             
         elif args.method == 'fine_tune':
             base_encoder.train()
             for param in base_encoder.parameters(): param.requires_grad = True
+            # 🟢 修复：底座微调学习率使用 down_lr，分类器使用 clf_lr
             optimizer_down = torch.optim.Adam([
-                {"params": base_encoder.parameters(), "lr": 0.0001},
-                {"params": classifier.parameters(), "lr": 0.05}
+                {"params": base_encoder.parameters(), "lr": args.down_lr},
+                {"params": classifier.parameters(), "lr": args.clf_lr}
             ], weight_decay=args.down_wd)
         
         elif args.method == 'uniprompt':
             prompt = UniPrompt(x=data.x, k=args.k, metric='cosine', alpha=1.0, num_nodes=data.num_nodes).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
+            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
-                {"params": prompt.parameters(), "lr": 0.001, "weight_decay": 5e-4},
-                {"params": classifier.parameters(), "lr": 0.05}
-            ])
+                {"params": prompt.parameters(), "lr": args.down_lr},
+                {"params": classifier.parameters(), "lr": args.clf_lr}
+            ], weight_decay=args.down_wd)
 
         elif args.method == 'gppt':
             classifier = GPPT_Prompt(in_dim=args.hid_dim, num_classes=output_dim).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
+            # GPPT 的分类器兼具 Prompt 职能，这里维持原逻辑或统一使用 down_lr
             optimizer_down = torch.optim.Adam(classifier.parameters(), lr=args.down_lr, weight_decay=args.down_wd)
             
         elif args.method in ['gpf', 'gpf_plus', 'all_in_one']:
@@ -189,9 +194,10 @@ def run(args, device):
             
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
+            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
-                {"params": classifier.parameters(), "lr": 0.05}
+                {"params": classifier.parameters(), "lr": args.clf_lr}
             ], weight_decay=args.down_wd)
 
         elif args.method in ['edgeprompt', 'edgeprompt_plus']:
@@ -200,27 +206,30 @@ def run(args, device):
             
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
+            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
-                {"params": classifier.parameters(), "lr": 0.05}
+                {"params": classifier.parameters(), "lr": args.clf_lr}
             ], weight_decay=args.down_wd)
 
         elif args.method == 'graphprompt':
             prompt = GraphPrompt_Prompt(in_dim=args.hid_dim).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
+            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
-                {"params": classifier.parameters(), "lr": 0.05}
+                {"params": classifier.parameters(), "lr": args.clf_lr}
             ], weight_decay=args.down_wd)
         
         elif args.method == 'hybrid_prompt':
             prompt = HybridPrompt(data.x, input_dim, args.num_prompts, args.ot_epsilon, args.k, args.alpha).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
+            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
-                {"params": classifier.parameters(), "lr": 0.05}
+                {"params": classifier.parameters(), "lr": args.clf_lr}
             ], weight_decay=args.down_wd)
 
         best_val_acc = -1.0
@@ -362,6 +371,7 @@ if __name__ == "__main__":
     parser.add_argument('--shot', type=int, default=1)
     parser.add_argument('--trails', type=int, default=30)
     parser.add_argument('--down_lr', type=float, default=0.005)
+    parser.add_argument('--clf_lr', type=float, default=0.05)   # 🟢 新增：分类器专属学习率
     parser.add_argument('--down_wd', type=float, default=5e-5)
     parser.add_argument('--down_epochs', type=int, default=500)
     parser.add_argument('--tau', type=float, default=0.5)
