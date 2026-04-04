@@ -7,12 +7,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==========================================
 # ⚖️ 全量基线 & 全量底座 扫表引擎 (3-Shot)
 # ==========================================
-GPUS = ['2'] 
+GPUS = ['0', '1', '2', '3']  # 可用 GPU 列表
 MAX_CONCURRENT_PER_GPU = 6  
 
-# 🟢 升级 1：三大底座全家桶
-PRETRAINS = ["DGI", "GRACE", "GraphMAE"]
-SHOTS = [3] # 🟢 锁死 3-shot
+PRETRAINS = ["GraphMAE2"]
+SHOTS = [1] # 🟢 锁死 3-shot
 
 TRAILS = 30         
 EPOCHS = 2000       

@@ -8,6 +8,10 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from torch_geometric.utils import add_self_loops, dropout_adj
 from torch_geometric.nn import GCNConv
+import dgl  # 🟢 引入 DGL 供 GraphMAE2 使用
+import sys
+import yaml
+import importlib
 
 # 导入自定义模块
 from utils.data_loader import load_dataset, generate_few_shot_splits, inject_noise_edges
@@ -65,17 +69,160 @@ def run(args, device):
 
     # [1] 实例化底座
     if args.model == 'GraphMAE':
+        # 🟢 原版 GraphMAE，完全保留你的旧逻辑
         raw_model = build_model(num_hidden=args.hid_dim, num_features=input_dim).to(device)
+    
     elif args.model == 'DGI':
         raw_model = DGI(input_dim, args.hid_dim, 'prelu').to(device)
+    
     elif args.model == 'GRACE':
         encoder = Encoder(input_dim, args.hid_dim, nn.PReLU(), base_model=GCNConv, k=2).to(device)
         raw_model = GRACE_Model(encoder, args.hid_dim, args.hid_dim, 0.5).to(device)
+    
+    elif args.model == 'GraphMAE2':
+        import sys
+        import importlib
+        from argparse import Namespace
+        
+        print(f"=== 正在加载 GraphMAE2 ({args.dataset}) SOTA预训练基座 ===")
+        
+        # 1. 🌟 绝对物理路径定位
+        graphmae2_root = os.path.abspath('./pretrain_model/graphmae2')
+        curr_dir = os.getcwd()
+
+        # 2. 🌟 【物理隔绝】备份并彻底清洗环境
+        # 备份 sys.path 和 sys.modules
+        old_sys_path = sys.path[:]
+        modules_backup = {k: v for k, v in sys.modules.items() if k == 'models' or k.startswith('models.') or k == 'utils' or k.startswith('utils.')}
+        
+        # 彻底移除当前目录和所有 models 相关缓存
+        for k in modules_backup: sys.modules.pop(k)
+        
+        # 强行让 sys.path 第一位是 GraphMAE2，并且移除当前主目录 '.'
+        # 这样 Python 在 import models 时，绝对看不见你主项目的 models
+        new_path = [graphmae2_root]
+        for p in old_sys_path:
+            if os.path.abspath(p) != os.path.abspath(curr_dir) and p != '':
+                new_path.append(p)
+        sys.path = new_path
+        
+        try:
+            # 3. 🌟 核心加载：此时 Python 处于“失忆状态”，只会加载 GraphMAE2 的 models
+            import models as mae2_pkg
+            importlib.reload(mae2_pkg)
+            build_mae2 = mae2_pkg.build_model
+            
+            # --- 智能配置加载 --- (逻辑保持不变)
+            config_path = os.path.join(graphmae2_root, "configs", f"{args.dataset}.yaml")
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    cfg = yaml.load(f, yaml.FullLoader)
+            else:
+                print(f">> [提示] 未找到 {args.dataset}.yaml，启动【异配图专属默认配置】")
+                # 为异配小图（Cornell, Texas, Wisconsin等）量身定制的 SOTA 级超参配置
+            # 🟢 GraphMAE2 全参数补全版：适配异配图/无 yaml 场景
+            cfg = {
+                # 1. 训练与优化
+                'lr': 0.001, 
+                'weight_decay': 1e-4, 
+                'optimizer': 'adam',
+                
+                # 2. 架构维度
+                'num_hidden': 512, 
+                'num_heads': 4,
+                'num_out_heads': 1, 
+                'num_layers': 2, 
+                'num_dec_layers': 1, 
+                
+                # 3. 掩码机制 (修复报错的核心)
+                'mask_rate': 0.5,
+                'mask_method': 'random',    # 🟢 修复当前报错：第一阶段掩码方式
+                'remask_rate': 0.5, 
+                'remask_method': 'random',  # 第二阶段重掩码方式
+                'num_remasking': 3, 
+                'replace_rate': 0.05, 
+                'drop_edge_rate': 0.0,
+                
+                # 4. 编码器/解码器细节
+                'encoder': 'gat', 
+                'decoder': 'gat', 
+                'activation': 'prelu', 
+                'negative_slope': 0.2, 
+                'attn_drop': 0.1,
+                'in_drop': 0.2, 
+                'norm': 'layernorm',
+                'residual': True, 
+                'concat_out': False,
+                
+                # 5. 损失函数与动量更新
+                'loss_fn': 'sce', 
+                'alpha_l': 2.0, 
+                'lam': 1.0,
+                'delayed_ema_epoch': 0, 
+                'momentum': 0.996,         # 教师网络更新动量
+                
+                # 6. 杂项 (MAE2 构造函数会扫描的所有字段)
+                'type_grad': 'grad', 
+                'pooling': 'mean',
+                'zero_init': False,
+                'alpha_l': 2.0,            # 重复确认 SCE loss 参数
+                'is_sparse': False,        # 是否处理稀疏图
+            }
+            
+            cfg['num_features'] = input_dim 
+            cfg['dataset'] = args.dataset
+            cfg['residual'] = cfg.get('residual', False)
+            cfg['zero_init'] = False
+            mae2_args = Namespace(**cfg)
+            
+            # 4. 🌟 构建模型
+            raw_model = build_mae2(mae2_args).to(device)
+            print(f">> 基座架构加载成功！")
+            
+        finally:
+            # 5. 🌟 【时空复原】把主项目的环境还回来
+            # 移除 GraphMAE2 的临时 models 缓存
+            for k in list(sys.modules.keys()):
+                if k == 'models' or k.startswith('models.'): sys.modules.pop(k)
+            
+            # 恢复备份，恢复路径
+            sys.modules.update(modules_backup)
+            sys.path = old_sys_path
+
+        # 6. 权重加载与 JIT 预训练 (逻辑保持不变)
+        ckpt_dir = os.path.join(graphmae2_root, "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        model_save_path = os.path.join(ckpt_dir, f"{args.dataset}.pt")
+        
+        if os.path.exists(model_save_path):
+            raw_model.load_state_dict(torch.load(model_save_path, map_location=device))
+            print(f">> 成功挂载权重: {args.dataset}.pt")
+        else:
+            print(f">> 🚀 正在启动 GraphMAE2 本地【即时预训练】引擎...")
+            raw_model.train()
+            optimizer_pt = torch.optim.Adam(raw_model.parameters(), lr=cfg['lr'], weight_decay=cfg['weight_decay'])
+            
+            import dgl
+            src, dst = edge_index
+            g_pt = dgl.graph((src, dst), num_nodes=data.num_nodes).to(device)
+            g_pt = dgl.add_self_loop(dgl.remove_self_loop(g_pt))
+            
+            for pt_epoch in range(500): 
+                loss_pt = raw_model(g_pt, data.x)
+                optimizer_pt.zero_grad(); loss_pt.backward(); optimizer_pt.step()
+                if (pt_epoch + 1) % 100 == 0:
+                    print(f"   - Epoch {pt_epoch+1}/500 | Loss: {loss_pt.item():.4f}")
+            torch.save(raw_model.state_dict(), model_save_path)
+
+        raw_model.eval()
+        for param in raw_model.encoder.parameters(): param.requires_grad = False
+        args.hid_dim = mae2_args.num_hidden
+
     else:
         raise ValueError(f"Unsupported model: {args.model}")
     
-    # [2] 🔥 全自动预训练引擎：如果找不到权重，不再报错，而是直接原地开始炼丹！
-    if not os.path.exists(model_save_path):
+    # [2] 老模型的全自动预训练引擎 (GraphMAE2 已在上面处理完毕，这里会跳过)
+    if not os.path.exists(model_save_path) and args.model != 'GraphMAE2':
         print(f"🔥 未找到 {args.model} 权重 ({model_save_path})，正在全自动执行预训练...")
         optimizer = torch.optim.Adam(raw_model.parameters(), lr=args.lr, weight_decay=args.wd)
         
@@ -111,22 +258,48 @@ def run(args, device):
         print(f"✅ {args.model} 在 {args.dataset} 上的预训练已完成，权重已保存！")
     
     # [3] 统一加载已存在的/刚刚训练好的权重
-    raw_model.load_state_dict(torch.load(model_save_path, map_location=device, weights_only=True))
+    if args.model != 'GraphMAE2':
+        raw_model.load_state_dict(torch.load(model_save_path, map_location=device, weights_only=True))
 
-    # [4] 透明代理层 (BackboneWrapper)：抹平 DGI 返回值的差异
+    # [4] 🟢 终极透明代理层 (BackboneWrapper)：抹平 PyG 和 DGL 的差异
     class BackboneWrapper:
         def __init__(self, model_type, model):
             self.model_type = model_type
             self.model = model
             
-        def embed(self, x, edge_index, edge_weight):
+        def embed(self, x, edge_index, edge_weight=None):
             if self.model_type == 'DGI':
                 z, _ = self.model.embed(x, edge_index, edge_weight, None)
                 return z
+            elif self.model_type == 'GraphMAE2':
+                import dgl
+                src, dst = edge_index
+                g_eval = dgl.graph((src, dst), num_nodes=x.shape[0]).to(x.device)
+                g_eval = dgl.add_self_loop(dgl.remove_self_loop(g_eval))
+                # 🟢 关键：GraphMAE2 必须调用其 PreModel 的 embed 方法
+                return self.model.embed(g_eval, x)
             else:
                 return self.model.embed(x, edge_index, edge_weight)
                 
+        # 让 optimizer 也能正确抓取参数
+        def parameters(self):
+            if self.model_type == 'GraphMAE2':
+                return self.model.encoder.parameters()
+            return self.model.parameters()
+            
+        def state_dict(self):
+            if self.model_type == 'GraphMAE2':
+                return self.model.encoder.state_dict()
+            return self.model.state_dict()
+            
+        def load_state_dict(self, state_dict):
+            if self.model_type == 'GraphMAE2':
+                self.model.encoder.load_state_dict(state_dict)
+            else:
+                self.model.load_state_dict(state_dict)
+                
         def __getattr__(self, name):
+            # 将其他未实现的方法转发给内部的 model
             return getattr(self.model, name)
 
     base_encoder = BackboneWrapper(args.model, raw_model)
@@ -149,7 +322,6 @@ def run(args, device):
             prompt = SAOTPrompt(data.x, input_dim, args.num_prompts, args.ot_epsilon, args.k).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
-            # 🟢 修复：解耦 down_lr (给Prompt) 和 clf_lr (给分类器)
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
                 {"params": classifier.parameters(), "lr": args.clf_lr}
@@ -158,13 +330,11 @@ def run(args, device):
         elif args.method == 'linear_probe':
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
-            # 🟢 修复：替换硬编码
             optimizer_down = torch.optim.Adam(classifier.parameters(), lr=args.clf_lr, weight_decay=args.down_wd)
             
         elif args.method == 'fine_tune':
             base_encoder.train()
             for param in base_encoder.parameters(): param.requires_grad = True
-            # 🟢 修复：底座微调学习率使用 down_lr，分类器使用 clf_lr
             optimizer_down = torch.optim.Adam([
                 {"params": base_encoder.parameters(), "lr": args.down_lr},
                 {"params": classifier.parameters(), "lr": args.clf_lr}
@@ -174,7 +344,6 @@ def run(args, device):
             prompt = UniPrompt(x=data.x, k=args.k, metric='cosine', alpha=1.0, num_nodes=data.num_nodes).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
-            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
                 {"params": classifier.parameters(), "lr": args.clf_lr}
@@ -184,7 +353,6 @@ def run(args, device):
             classifier = GPPT_Prompt(in_dim=args.hid_dim, num_classes=output_dim).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
-            # GPPT 的分类器兼具 Prompt 职能，这里维持原逻辑或统一使用 down_lr
             optimizer_down = torch.optim.Adam(classifier.parameters(), lr=args.down_lr, weight_decay=args.down_wd)
             
         elif args.method in ['gpf', 'gpf_plus', 'all_in_one']:
@@ -194,7 +362,6 @@ def run(args, device):
             
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
-            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
                 {"params": classifier.parameters(), "lr": args.clf_lr}
@@ -206,7 +373,6 @@ def run(args, device):
             
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
-            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
                 {"params": classifier.parameters(), "lr": args.clf_lr}
@@ -216,7 +382,6 @@ def run(args, device):
             prompt = GraphPrompt_Prompt(in_dim=args.hid_dim).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
-            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
                 {"params": classifier.parameters(), "lr": args.clf_lr}
@@ -226,7 +391,6 @@ def run(args, device):
             prompt = HybridPrompt(data.x, input_dim, args.num_prompts, args.ot_epsilon, args.k, args.alpha).to(device)
             base_encoder.eval()
             for param in base_encoder.parameters(): param.requires_grad = False
-            # 🟢 修复：解耦
             optimizer_down = torch.optim.Adam([
                 {"params": prompt.parameters(), "lr": args.down_lr},
                 {"params": classifier.parameters(), "lr": args.clf_lr}
@@ -357,7 +521,8 @@ def run(args, device):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='cora')
-    parser.add_argument('--model', type=str, default='GraphMAE', choices=['GraphMAE', 'DGI', 'GRACE'])
+    # 🟢 注意：这里加入了 GraphMAE2 供你选择！
+    parser.add_argument('--model', type=str, default='GraphMAE', choices=['GraphMAE', 'DGI', 'GRACE', 'GraphMAE2'])
     parser.add_argument('--method', type=str, default='sa_ot_prompt', 
                         choices=['sa_ot_prompt', 'linear_probe', 'fine_tune', 'uniprompt', 
                                  'hybrid_prompt', 'gppt', 'gpf', 'gpf_plus', 
@@ -371,7 +536,7 @@ if __name__ == "__main__":
     parser.add_argument('--shot', type=int, default=1)
     parser.add_argument('--trails', type=int, default=30)
     parser.add_argument('--down_lr', type=float, default=0.005)
-    parser.add_argument('--clf_lr', type=float, default=0.05)   # 🟢 新增：分类器专属学习率
+    parser.add_argument('--clf_lr', type=float, default=0.05)
     parser.add_argument('--down_wd', type=float, default=5e-5)
     parser.add_argument('--down_epochs', type=int, default=500)
     parser.add_argument('--tau', type=float, default=0.5)
