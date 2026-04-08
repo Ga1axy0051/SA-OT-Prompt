@@ -42,6 +42,7 @@ def load_dataset(dataset_name, data_dir="./data/raw"):
         raise ValueError(f"Dataset {dataset_name} is not supported yet!")
         
     data = dataset[0]
+    print(f"DEBUG: Labels shape: {data.y.shape}")
     return data, dataset.num_features, dataset.num_classes
 
 

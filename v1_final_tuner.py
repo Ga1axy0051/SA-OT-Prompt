@@ -9,34 +9,35 @@ import queue
 import random
 
 # ==========================================
-# 👑 SA-OT-PROMPT ULTIMATE TUNER (V2 动态耐心排队版)
+# 👑 GraphMAE (v1) 绝对公平·微雕爆破引擎 (动态耐心排队版)
 # ==========================================
-GPUS = [ '4', '5', '6', '7'] 
-MAX_CONCURRENT_PER_GPU = 3  # 允许高并发探底，配合耐心等位，4并发也是安全的
+GPUS = ['0', '1', '2', '3']  # 你的显卡
+# 🟢 并发上限调到 3，配合错峰发车，绝对安全且高效
+MAX_CONCURRENT_PER_GPU = 3   
 
-PRETRAIN = "GraphMAE2"
-TRAILS = 30
+# 🔴 核心纪律：所有架构参数彻底锁死，不再动摇！
+PRETRAIN = "GraphMAE"
+TRAILS = 30             
 EPOCHS = 2000
-PATIENCE = 100
-WDS = [5e-5]
+PATIENCE = 100           
+WDS = [5e-5]            
+NUM_PROMPTS = [10]      
 
 # ==========================================
-# 🎯 V2 广撒网拓荒网格
+# 🎯 v1 专属微雕网格
 # ==========================================
-# 1. 针对异配图 (Texas, Wisconsin, Cornell, Actor, Chameleon, Squirrel)
 HETERO_GRID = {
-    'tau': [0.0, 0.2],               # 只探底和微调
-    'k': [20, 60, 120],              # 小、中、大三种视野
-    'lr': [0.001, 0.01, 0.05],       # 跨量级搜索 (0.05作为满血分类器下的试探极限)
-    'beta': [0.001, 0.01, 0.1]       # 跨量级搜索正则力度
+    'tau': [0.0, 0.2],               
+    'k': [20, 60, 120],              
+    'lr': [0.001, 0.01, 0.05],       
+    'beta': [0.001, 0.01, 0.1]       
 }
 
-# 2. 针对同配图 (Cora, Citeseer, Pubmed)
 HOMO_GRID = {
-    'tau': [0.5, 0.8, 1.0],          # 中、高、满贯
-    'k': [2, 10, 50],                # 极小、中等、防漏大视野
-    'lr': [0.001, 0.01, 0.05],       # 跨量级搜索
-    'beta': [0.0001, 0.005, 0.05]    # 跨量级搜索
+    'tau': [0.5, 0.8, 1.0],          
+    'k': [2, 10, 50],                
+    'lr': [0.001, 0.01, 0.05],       
+    'beta': [0.0001, 0.005, 0.05]    
 }
 
 SPECIFIC_GRIDS = {
@@ -46,18 +47,16 @@ SPECIFIC_GRIDS = {
     'actor': {1: HETERO_GRID, 3: HETERO_GRID, 5: HETERO_GRID},
     'chameleon': {1: HETERO_GRID, 3: HETERO_GRID, 5: HETERO_GRID},
     'squirrel': {1: HETERO_GRID, 3: HETERO_GRID, 5: HETERO_GRID},
-    
     'cora': {1: HOMO_GRID, 3: HOMO_GRID, 5: HOMO_GRID},
     'citeseer': {1: HOMO_GRID, 3: HOMO_GRID, 5: HOMO_GRID},
     'pubmed': {1: HOMO_GRID, 3: HOMO_GRID, 5: HOMO_GRID}
 }
 
-RESULT_DB = "tuning_results_db.json"
-LOG_DIR = "logs_v2_coarse"
-MD_FILE = "SA_OT_SOTA_Leaderboard.md"
+RESULT_DB = "v1_tuning_results_db.json"
+LOG_DIR = "logs_v1_coarse"
+MD_FILE = "SA_OT_v1_Leaderboard.md"
 
 best_results = {}
-
 if os.path.exists(RESULT_DB):
     try:
         with open(RESULT_DB, 'r') as f:
@@ -65,33 +64,15 @@ if os.path.exists(RESULT_DB):
     except: pass
 
 def parse_accuracy(log_content):
-    match = re.search(r'Accuracy:\s*([0-9.]+)\s*±\s*([0-9.]+)', log_content)
-    if match:
-        return float(match.group(1)), float(match.group(2))
+    lines = log_content.strip().split('\n')[-15:]
+    for line in lines:
+        match = re.search(r'Accuracy:\s*([0-9.]+)\s*±\s*([0-9.]+)', line)
+        if match:
+            return float(match.group(1)), float(match.group(2))
     return None, None
 
-def parse_dim(log_content):
-    """ 🟢 核心新增：从日志中提取总维度钢印 """
-    match = re.search(r'Total Dim:\s*(\d+)', log_content)
-    if match:
-        return int(match.group(1))
-    return None
-
-def update_leaderboard():
-    with open(MD_FILE, "w", encoding="utf-8") as f:
-        f.write("# 👑 SA-OT-Prompt Ultimate SOTA\n\n")
-        f.write("| Dataset | Shot | Best Acc | Std | LR | WD | Tau | k | Beta | Prompts |\n")
-        f.write("|---|---|---|---|---|---|---|---|---|---|\n")
-        sorted_keys = sorted(best_results.keys())
-        for key_str in sorted_keys:
-            ds, shot = key_str.split(',')
-            acc, std, lr, wd, tau, k, beta, prompts = best_results[key_str]
-            f.write(f"| **{ds}** | {shot} | **{acc:.4f}** | ±{std:.4f} | {lr} | {wd} | {tau} | {k} | {beta} | {prompts} |\n")
-    with open(RESULT_DB, 'w') as f:
-        json.dump(best_results, f, indent=4)
-
 # ==========================================
-# 🧠 核心：自主显存探测引擎状态机 (引入动态限流)
+# 🧠 核心：无差别显存碰撞引擎 (引入动态限流)
 # ==========================================
 task_queue = queue.Queue()
 active_counts = {g: 0 for g in GPUS}
@@ -127,32 +108,17 @@ def worker(gpu_id):
         ds, shot, lr, wd, tau, k, beta, prompts = task_tuple
 
         os.makedirs(LOG_DIR, exist_ok=True)
-        log_file = f"{LOG_DIR}/{ds}_{shot}s_lr{lr}_tau{tau}_k{k}_b{beta}_p{prompts}.txt"
+        log_file = f"{LOG_DIR}/{ds}_{shot}s_lr{lr}_tau{tau}_k{k}_beta{beta}.txt"
 
-        # ==========================================
-        # 🟢 V2 专属：双重缓存质检 (准确率 + 256维度对齐)
-        # ==========================================
+        # 命中缓存，直接跳过
         if not req_empty and os.path.exists(log_file):
             with open(log_file, "r", encoding="utf-8", errors='ignore') as f:
-                content = f.read()
-                acc, std = parse_accuracy(content)
-                actual_dim = parse_dim(content)
-                
-                # 如果分数存在，并且维度完美匹配 256，认定为合法缓存
-                if acc is not None and actual_dim == 256: 
+                acc, std = parse_accuracy(f.read())
+                if acc is not None:
                     with print_lock:
                         completed_tasks += 1
-                        if completed_tasks % 10 == 0:
-                            print(f"Progress: {completed_tasks}/{total_tasks} [Cached]")
                     task_queue.task_done()
                     continue
-            
-            # 走到这里说明缓存存在但失效（没有256维度或者报错残缺），直接物理销毁
-            if os.path.exists(log_file):
-                try:
-                    os.remove(log_file)
-                except:
-                    pass
 
         # ---------------- 🛡️ 智能准入与错峰调度系统 ----------------
         can_run = False
@@ -161,19 +127,18 @@ def worker(gpu_id):
                 can_run = False
             elif req_empty:
                 if active_counts[gpu_id] > 0:
-                    can_run = False  # 要求包场，但还有人没跑完，等一下
+                    can_run = False 
                 else:
                     can_run = True
                     active_counts[gpu_id] += 1
-                    exclusive_mode[gpu_id] = True # 开启包场锁死
+                    exclusive_mode[gpu_id] = True 
             else:
                 can_run = True
                 active_counts[gpu_id] += 1
 
         if not can_run:
-            # 进不去显卡，重新排到队尾！让后面的小任务插队！
             task_queue.put(task_item)
-            time.sleep(random.uniform(2, 5)) # 随机延迟防死锁
+            time.sleep(random.uniform(2, 5)) 
             task_queue.task_done()
             continue
 
@@ -184,20 +149,18 @@ def worker(gpu_id):
 
         # ---------------- 🛡️ 严格锁死运行命令 ----------------
         cmd = [
-            "python", "-u", "main.py", "--dataset", ds, "--method", "sa_ot_prompt", "--model", PRETRAIN,
-            "--shot", str(shot), 
-            "--down_lr", str(lr), 
-            "--clf_lr", "0.05",         # 🔴 分类器直接锁死 0.05
+            "python", "-u", "main.py",
+            "--dataset", ds, "--method", "sa_ot_prompt", "--model", PRETRAIN,
+            "--shot", str(shot), "--down_lr", str(lr), 
+            "--clf_lr", "0.05",         # 🔴 分类器学习率锁死
             "--down_wd", str(wd), 
-            "--tau", str(tau), 
-            "--k", str(k), 
-            "--ot_beta", str(beta),
-            "--num_prompts", str(prompts), 
+            "--tau", str(tau), "--k", str(k), "--ot_beta", str(beta), 
+            "--num_prompts", str(prompts),
             "--epochs", "2000",         
-            "--down_epochs", "2000",    # 💣 彻底放开下游微调上限
-            "--patience", "100",        # 🟡 耐心给到 100
+            "--down_epochs", "2000",    # 💣 彻底放开上限
+            "--patience", "100",        # 🟡 耐心加倍
             "--trails", str(TRAILS), 
-            "--hid_dim", "256"          # 🟢 维度锁死
+            "--hid_dim", "256"          # 🟢 维度焊死
         ]
         
         env = os.environ.copy()
@@ -212,10 +175,10 @@ def worker(gpu_id):
             with open(log_file, "w") as f:
                 f.write(output)
 
-            # 🧠 全量小写化匹配
+            # 🧠 暴力小写化匹配
             output_lower = output.lower()
 
-            # 🧠 增强型 OOM 探测网
+            # 🧠 增强型 OOM 探测
             is_oom = (
                 "out of memory" in output_lower or 
                 "oom" in output_lower or 
@@ -223,7 +186,7 @@ def worker(gpu_id):
                 process.returncode == 137 
             )
             
-            # 🔴 [核心改动 3]：精准的状态标记与限流
+            # 🔴 [核心改动 3]：精准的状态标记
             with active_lock:
                 active_counts[gpu_id] -= 1
                 if req_empty:
@@ -255,7 +218,7 @@ def worker(gpu_id):
                     task_queue.task_done()
                 continue
 
-            # 检查进程是否正常退出
+            # 检查是否正常退出
             if process.returncode != 0:
                 acc, std = None, None
             else:
@@ -276,38 +239,51 @@ def worker(gpu_id):
             if acc is not None:
                 key = f"{ds},{shot}"
                 if key not in best_results or acc > best_results[key][0]:
-                    print(f"🔥 NEW SOTA for {ds.upper()} {shot}s! Acc: {acc:.4f} (lr={lr}, tau={tau}, k={k}, beta={beta})")
-                    best_results[key] = [acc, std, lr, wd, tau, k, beta, prompts]
-                    update_leaderboard()
+                    print(f"🔥 NEW V1 SOTA for {ds.upper()} {shot}-shot! Acc: {acc:.4f} (lr={lr}, tau={tau}, k={k}, beta={beta})")
+                    best_results[key] = (acc, std, lr, wd, tau, k, beta, prompts)
+                    
+                    with open(MD_FILE, "w", encoding="utf-8") as f:
+                        f.write("# 🛡️ GraphMAE (v1) Absolute Baseline\n\n")
+                        f.write("| Dataset | Shot | Best Acc | Std | LR | WD | Tau | k | Beta | Prompts |\n")
+                        f.write("|---|---|---|---|---|---|---|---|---|---|\n")
+                        sorted_keys = sorted(best_results.keys(), key=lambda x: (x.split(',')[0], int(x.split(',')[1])))
+                        for k_md in sorted_keys:
+                            d_md, s_md = k_md.split(',')
+                            a_md, st_md, l_md, w_md, t_md, k_val, b_md, p_md = best_results[k_md]
+                            f.write(f"| **{d_md.capitalize()}** | {s_md} | **{a_md:.4f}** | ±{st_md:.4f} | {l_md} | {w_md} | {t_md} | {k_val} | {b_md} | {p_md} |\n")
+                    with open(RESULT_DB, 'w') as f:
+                        json.dump(best_results, f, indent=4)
+                        
                 elif completed_tasks % 10 == 0:
-                    print(f"Progress: {completed_tasks}/{total_tasks} explored...")
+                    print(f"{completed_tasks}/{total_tasks} explored...")
             else:
-                print(f"Progress: {completed_tasks}/{total_tasks} [ERROR/CRASH] {ds} {shot}s")
+                print(f"{completed_tasks}/{total_tasks} [ERROR/CRASH] {ds} {shot}s (Check log)")
 
         task_queue.task_done()
 
 def main():
     global total_tasks
-    print("🚀 SA-OT-PROMPT BOMBING INITIATED (Dynamic Backpressure & Dimension Guard)")
+    print("==========================================================")
+    print("🛡️ GraphMAE (v1) AUTO-VRAM DETECT ENGINE (DYNAMIC BACKPRESSURE)")
     print(f"GPUs: {GPUS} | Workers/GPU: {MAX_CONCURRENT_PER_GPU}")
-    
+    print("==========================================================\n")
+
     all_tasks = []
     for ds in SPECIFIC_GRIDS.keys():
         for shot in [1, 3, 5]:
-            if shot not in SPECIFIC_GRIDS[ds]:
-                continue
+            if shot not in SPECIFIC_GRIDS[ds]: continue
             grid = SPECIFIC_GRIDS[ds][shot]
-            current_prompts = [10]
-            combos = list(itertools.product([ds], [shot], grid['lr'], WDS, grid['tau'], grid['k'], grid['beta'], current_prompts))
+            combos = list(itertools.product(
+                [ds], [shot], grid['lr'], WDS, grid['tau'], grid['k'], grid['beta'], NUM_PROMPTS
+            ))
             all_tasks.extend(combos)
     
     total_tasks = len(all_tasks)
-    print(f"🎯 Total Configs: {total_tasks}")
+    print(f"🎯 Total Configs to Explore: {total_tasks}")
     
-    # 🔀 核心动作：打乱任务，大图小图混排，让缝隙插队最大化！
+    # 🔀 打乱任务，实现自然插队和缝隙填补
     random.seed(42)
     random.shuffle(all_tasks)
-    print("🔀 Tasks shuffled for optimal VRAM packing!\n")
     
     # 🚀 绝对纯净的入队：没有任何经验预判，初始 fail_count 为 0
     for t in all_tasks:
@@ -317,12 +293,16 @@ def main():
     for i in range(len(GPUS) * MAX_CONCURRENT_PER_GPU):
         gpu_id = GPUS[i % len(GPUS)]
         t = threading.Thread(target=worker, args=(gpu_id,))
-        time.sleep(1.5) # 给线程启动本身加个微小间隔
+        
+        # 🟢 给线程启动本身加个微小间隔，防止瞬间并发拉起
+        time.sleep(1.5) 
         t.start()
         threads.append(t)
 
     for t in threads:
         t.join()
+
+    print(f"\n🎉 V1 TUNING COMPLETED! Check '{MD_FILE}'.")
 
 if __name__ == "__main__":
     main()

@@ -7,15 +7,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==========================================
 # ⚖️ 全量基线 & 全量底座 扫表引擎 (3-Shot)
 # ==========================================
-GPUS = ['0', '1', '2', '3']  # 可用 GPU 列表
+GPUS = ['4', '5']  # 可用 GPU 列表
 MAX_CONCURRENT_PER_GPU = 6  
 
 PRETRAINS = ["GraphMAE2"]
-SHOTS = [1] # 🟢 锁死 3-shot
+SHOTS = [5] # 🟢 锁死 5-shot
 
 TRAILS = 30         
-EPOCHS = 2000       
-PATIENCE = 20       
+EPOCHS = 2000            
 
 # 数据集全集
 DATASETS = ["cora", "citeseer", "pubmed", "cornell", "texas", "wisconsin", "chameleon", "actor", "squirrel"]
@@ -70,9 +69,20 @@ def run_task(task):
 
     cmd = [
         "python", "-u", "main.py",
-        "--dataset", ds, "--method", method, "--model", pretrain,
-        "--shot", str(shot), "--down_lr", str(lr), "--down_wd", str(wd),
-        "--epochs", str(EPOCHS), "--patience", str(PATIENCE), "--trails", str(TRAILS)
+        "--dataset", ds, 
+        "--method", method, 
+        "--model", pretrain,
+        "--shot", str(shot), 
+        "--down_lr", str(lr),      # Baseline 专属的 Prompt/微调学习率
+        "--down_wd", str(wd),      # Baseline 的正则化
+        
+        # 🔴 以下 5 个参数，全部与 SA-OT-Prompt 绝对对齐！
+        "--clf_lr", "0.05",        # 大家都用满血版分类器
+        "--hid_dim", "256",        # 大家都在 256 维的特征空间玩
+        "--epochs", "2000",        # 保底参数
+        "--down_epochs", "2000",   # 大家都不受 500 轮的限制
+        "--patience", "100",       # 大家都有 100 轮的容错耐心！
+        "--trails", str(TRAILS)    # 大家都是 30 次随机种子
     ]
     
     env = os.environ.copy()

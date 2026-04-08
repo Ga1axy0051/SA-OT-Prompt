@@ -18,12 +18,32 @@ from sklearn.neighbors import kneighbors_graph
 from torch_geometric.utils import add_self_loops, degree, coalesce
 
 
+import torch
+from torch_geometric.utils import degree
+
 def normalize_edge(edge_index, edge_weight, num_nodes):
     row, col = edge_index
-    deg = degree(row, num_nodes, dtype=torch.float32)
+    
+    # 🟢 第一步：防御性编程，修正 num_nodes
+    # 针对 Chameleon/Squirrel 等“脏”数据集，必须手动校验索引边界
+    max_idx = edge_index.max().item()
+    actual_num_nodes = max(num_nodes, max_idx + 1)
+    
+    # 🟢 第二步：确保 edge_weight 存在
+    if edge_weight is None:
+        edge_weight = torch.ones(edge_index.size(1), device=edge_index.device)
+    
+    # 🟢 第三步：计算对称归一化
+    # deg 的长度为 actual_num_nodes，确保不会越界
+    deg = degree(row, actual_num_nodes, dtype=torch.float32)
     deg_inv_sqrt = deg.pow(-0.5)
+    
+    # 处理孤立点（度为0的点），将 inf 替换为 0
     deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
+    
+    # 此时 deg_inv_sqrt[row] 和 deg_inv_sqrt[col] 访问的索引都在范围内
     norm = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
+    
     return norm
 
 def edge_combine(edge_index1, edge_weight1, edge_index2, edge_weight2, tau, device):
