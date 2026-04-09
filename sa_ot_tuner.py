@@ -11,7 +11,7 @@ import random
 # ==========================================
 # 👑 SA-OT-PROMPT ULTIMATE TUNER (V2 动态耐心排队版)
 # ==========================================
-GPUS = [ '4', '5', '6', '7'] 
+GPUS = ['6'] 
 MAX_CONCURRENT_PER_GPU = 3  # 允许高并发探底，配合耐心等位，4并发也是安全的
 
 PRETRAIN = "GraphMAE2"

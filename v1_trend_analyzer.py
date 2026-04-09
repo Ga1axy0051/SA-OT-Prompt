@@ -2,7 +2,7 @@ import os
 import re
 import pandas as pd
 
-LOG_DIR = "logs_v1_baseline"
+LOG_DIR = "logs_v1_coarse"
 
 def parse_logs():
     data = []
