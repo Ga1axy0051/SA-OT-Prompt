@@ -7,8 +7,9 @@ LOG_DIR = "logs_v1_coarse"
 def parse_logs():
     data = []
     # 兼容带 wd 和不带 wd 的文件名格式，同时兼容 b 和 beta
+    # 核心改动：把最后的 _p(\d+) 变成了 (?:_p(\d+))? 设为可选
     file_pattern = re.compile(
-        r"([a-zA-Z]+)_(\d+)s_lr([0-9.]+)(?:_wd([0-9eE.-]+))?_tau([0-9.]+)_k(\d+)_b(?:eta)?([0-9.]+)_p(\d+)\.txt"
+        r"([a-zA-Z]+)_(\d+)s_lr([0-9.]+)(?:_wd([0-9eE.-]+))?_tau([0-9.]+)_k(\d+)_b(?:eta)?([0-9.]+)(?:_p(\d+))?\.txt"
     )
     
     if not os.path.exists(LOG_DIR):
@@ -25,13 +26,17 @@ def parse_logs():
             
         ds, shot, lr, wd, tau, k, beta, prompts = match.groups()
         
-        # 🔴 核心过滤：只要 Prompts = 10
-        if int(prompts) != 10:
+        # 🟢 【核心修正】: 为 None 值注入默认值，防止 int(None) 报错
+        # v1 旧日志文件名没写 wd 默认就是 5e-5，没写 prompts 默认就是 10
+        current_wd = float(wd) if wd is not None else 5e-5
+        current_prompts = int(prompts) if prompts is not None else 10
+
+        # 🔴 【恢复过滤逻辑】: 过滤掉不符合条件的记录
+        if current_prompts != 10:
             continue
             
-        # 🔴 核心过滤：只要 WD = 5e-5 (旧日志没写wd的默认也是5e-5)
-        current_wd = float(wd) if wd else 5e-5
-        if current_wd != 5e-5:
+        # 浮点数比较建议用差值，或者确保字符串转换后一致
+        if abs(current_wd - 5e-5) > 1e-9:
             continue
             
         filepath = os.path.join(LOG_DIR, filename)
@@ -50,7 +55,7 @@ def parse_logs():
                         "tau": float(tau),
                         "k": int(k),
                         "beta": float(beta),
-                        "prompts": int(prompts),
+                        "prompts": current_prompts, # 使用注入后的默认值
                         "acc": acc
                     })
         except Exception as e:
@@ -84,7 +89,6 @@ def analyze_trends(df):
             
             # 2. 核心超参趋势分析 (取均值和极值)
             print("📈 [超参趋势分析] (展示特定参数值下的平均准确率):")
-            # 因为 prompts 已经锁死 10，就不分析它了
             params_to_analyze = ['tau', 'k', 'lr', 'beta']
             
             for param in params_to_analyze:
