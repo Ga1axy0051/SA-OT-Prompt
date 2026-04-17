@@ -7,11 +7,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==========================================
 # ⚖️ 全量基线 & 全量底座 扫表引擎 (3-Shot)
 # ==========================================
-GPUS = ['4', '5']  # 可用 GPU 列表
-MAX_CONCURRENT_PER_GPU = 6  
+GPUS = ['0', '1']  # 可用 GPU 列表
+MAX_CONCURRENT_PER_GPU = 5  
 
-PRETRAINS = ["GraphMAE2"]
-SHOTS = [5] # 🟢 锁死 5-shot
+PRETRAINS = ["DGI"]
+SHOTS = [1, 3, 5] # 🟢 锁死 5-shot
 
 TRAILS = 30         
 EPOCHS = 2000            
@@ -81,7 +81,7 @@ def run_task(task):
         "--hid_dim", "256",        # 大家都在 256 维的特征空间玩
         "--epochs", "2000",        # 保底参数
         "--down_epochs", "2000",   # 大家都不受 500 轮的限制
-        "--patience", "100",       # 大家都有 100 轮的容错耐心！
+        "--patience", "50",       # 大家都有 100 轮的容错耐心！
         "--trails", str(TRAILS)    # 大家都是 30 次随机种子
     ]
     
